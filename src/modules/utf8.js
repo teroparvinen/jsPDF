@@ -19,9 +19,13 @@ import { toPDFName } from "../libs/pdfname.js";
     var padz = ["", "0", "00", "000", "0000"];
     var ar = [""];
     for (var i = 0, l = text.length, t; i < l; ++i) {
-      t = font.metadata.characterToGlyph(text.charCodeAt(i));
+      var charCode = text.charCodeAt(i);
+      t = font.metadata.characterToGlyph(charCode);
+      if (font.metadata.applyFeaturesToGlyph) {
+        t = font.metadata.applyFeaturesToGlyph(t);
+      }
       font.metadata.glyIdsUsed.push(t);
-      font.metadata.toUnicode[t] = text.charCodeAt(i);
+      font.metadata.toUnicode[t] = charCode;
       if (widths.indexOf(t) == -1) {
         widths.push(t);
         widths.push([parseInt(font.metadata.widthOfGlyph(t), 10)]);

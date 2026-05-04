@@ -55,6 +55,7 @@ jsPDF.API.TTFFont = (function() {
     this.os2 = new OS2Table(this);
     this.loca = new LocaTable(this);
     this.glyf = new GlyfTable(this);
+    this.gsub = new GsubTable(this);
     this.ascender =
       (this.os2.exists && this.os2.ascender) || this.hhea.ascender;
     this.decender =
@@ -134,6 +135,16 @@ jsPDF.API.TTFFont = (function() {
       ((_ref = this.cmap.unicode) != null ? _ref.codeMap[character] : void 0) ||
       0
     );
+  };
+  TTFFont.prototype.applyFeaturesToGlyph = function(glyphId) {
+    if (
+      this.gsub &&
+      this.gsub.smcpSubstitutions &&
+      this.gsub.smcpSubstitutions[glyphId] !== undefined
+    ) {
+      return this.gsub.smcpSubstitutions[glyphId];
+    }
+    return glyphId;
   };
   TTFFont.prototype.widthOfGlyph = function(glyph) {
     var scale;
@@ -1676,6 +1687,160 @@ var LocaTable = (function(_super) {
     return newLocaTable;
   };
   return LocaTable;
+})(Table);
+
+var GsubTable = (function(_super) {
+  __extends(GsubTable, _super);
+
+  function GsubTable() {
+    return GsubTable.__super__.constructor.apply(this, arguments);
+  }
+  GsubTable.prototype.tag = "GSUB";
+  GsubTable.prototype.parse = function(data) {
+    var i,
+      j,
+      tableOffset,
+      featureListOffset,
+      lookupListOffset,
+      featureCount,
+      tag,
+      featureOffset,
+      savedPos,
+      lookupIndexCount,
+      smcpLookupIndices,
+      lookupCount,
+      lookupOffsets,
+      lookupIndex,
+      lookupOffset,
+      lookupType,
+      subTableCount,
+      subTableOffsets,
+      self;
+
+    this.smcpSubstitutions = {};
+    tableOffset = this.offset;
+    data.pos = tableOffset;
+    data.pos += 4; // skip MajorVersion + MinorVersion
+    data.readUInt16(); // scriptListOffset (unused)
+    featureListOffset = data.readUInt16();
+    lookupListOffset = data.readUInt16();
+
+    data.pos = tableOffset + featureListOffset;
+    featureCount = data.readUInt16();
+    smcpLookupIndices = [];
+
+    for (i = 0; i < featureCount; i++) {
+      tag = data.readString(4);
+      featureOffset = data.readUInt16();
+      if (tag === "smcp") {
+        savedPos = data.pos;
+        data.pos = tableOffset + featureListOffset + featureOffset;
+        data.readUInt16(); // featureParamsOffset
+        lookupIndexCount = data.readUInt16();
+        for (j = 0; j < lookupIndexCount; j++) {
+          smcpLookupIndices.push(data.readUInt16());
+        }
+        data.pos = savedPos;
+      }
+    }
+
+    if (smcpLookupIndices.length === 0) return;
+
+    data.pos = tableOffset + lookupListOffset;
+    lookupCount = data.readUInt16();
+    lookupOffsets = [];
+    for (i = 0; i < lookupCount; i++) {
+      lookupOffsets.push(data.readUInt16());
+    }
+
+    self = this;
+    for (i = 0; i < smcpLookupIndices.length; i++) {
+      lookupIndex = smcpLookupIndices[i];
+      if (lookupIndex >= lookupCount) continue;
+      lookupOffset =
+        tableOffset + lookupListOffset + lookupOffsets[lookupIndex];
+      data.pos = lookupOffset;
+      lookupType = data.readUInt16();
+      data.readUInt16(); // lookupFlag
+      subTableCount = data.readUInt16();
+      subTableOffsets = [];
+      for (j = 0; j < subTableCount; j++) {
+        subTableOffsets.push(lookupOffset + data.readUInt16());
+      }
+      if (lookupType === 1) {
+        for (j = 0; j < subTableOffsets.length; j++) {
+          self.parseSingleSubst(data, subTableOffsets[j]);
+        }
+      }
+    }
+  };
+  GsubTable.prototype.parseSingleSubst = function(data, offset) {
+    var substFormat,
+      coverageRelOffset,
+      coverageOffset,
+      deltaGlyphID,
+      glyphCount,
+      substituteGlyphs,
+      glyphs,
+      i;
+    data.pos = offset;
+    substFormat = data.readUInt16();
+    coverageRelOffset = data.readUInt16();
+    coverageOffset = offset + coverageRelOffset;
+
+    if (substFormat === 1) {
+      deltaGlyphID = data.readInt16();
+      glyphs = this.parseCoverage(data, coverageOffset);
+      for (i = 0; i < glyphs.length; i++) {
+        this.smcpSubstitutions[glyphs[i]] = (glyphs[i] + deltaGlyphID) & 0xffff;
+      }
+    } else if (substFormat === 2) {
+      glyphCount = data.readUInt16();
+      substituteGlyphs = [];
+      for (i = 0; i < glyphCount; i++) {
+        substituteGlyphs.push(data.readUInt16());
+      }
+      glyphs = this.parseCoverage(data, coverageOffset);
+      for (i = 0; i < glyphs.length; i++) {
+        if (i < substituteGlyphs.length) {
+          this.smcpSubstitutions[glyphs[i]] = substituteGlyphs[i];
+        }
+      }
+    }
+  };
+  GsubTable.prototype.parseCoverage = function(data, offset) {
+    var coverageFormat,
+      glyphCount,
+      rangeCount,
+      startGlyphID,
+      endGlyphID,
+      glyphs,
+      i,
+      g;
+    data.pos = offset;
+    coverageFormat = data.readUInt16();
+    glyphs = [];
+
+    if (coverageFormat === 1) {
+      glyphCount = data.readUInt16();
+      for (i = 0; i < glyphCount; i++) {
+        glyphs.push(data.readUInt16());
+      }
+    } else if (coverageFormat === 2) {
+      rangeCount = data.readUInt16();
+      for (i = 0; i < rangeCount; i++) {
+        startGlyphID = data.readUInt16();
+        endGlyphID = data.readUInt16();
+        data.readUInt16(); // startCoverageIndex
+        for (g = startGlyphID; g <= endGlyphID; g++) {
+          glyphs.push(g);
+        }
+      }
+    }
+
+    return glyphs;
+  };
+  return GsubTable;
 })(Table);
 
 /************************************************************************************/
