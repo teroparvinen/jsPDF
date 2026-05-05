@@ -56,6 +56,10 @@ jsPDF.API.TTFFont = (function() {
     this.loca = new LocaTable(this);
     this.glyf = new GlyfTable(this);
     this.gsub = new GsubTable(this);
+    this.gsub.smcpEnabled =
+      this.gsub.exists &&
+      Object.keys(this.gsub.smcpSubstitutions).length > 0 &&
+      isSmallCapsFont(this.name);
     this.ascender =
       (this.os2.exists && this.os2.ascender) || this.hhea.ascender;
     this.decender =
@@ -139,7 +143,7 @@ jsPDF.API.TTFFont = (function() {
   TTFFont.prototype.applyFeaturesToGlyph = function(glyphId) {
     if (
       this.gsub &&
-      this.gsub.smcpSubstitutions &&
+      this.gsub.smcpEnabled &&
       this.gsub.smcpSubstitutions[glyphId] !== undefined
     ) {
       return this.gsub.smcpSubstitutions[glyphId];
@@ -176,6 +180,25 @@ jsPDF.API.TTFFont = (function() {
     gap = includeGap ? this.lineGap : 0;
     return ((this.ascender + gap - this.decender) / 1000) * size;
   };
+
+  var SMALL_CAPS_RE = /small[\s_-]?caps|smallcaps|\bSC\b/i;
+
+  // Turns out the most common way to detect a font that is intended to render in small caps
+  // is to check for the presence of smcp gsub substitutions and a simple string lookup in
+  // the font name records
+  var isSmallCapsFont = function(nameTable) {
+    var nameIDs = [1, 4, 17];
+    for (var i = 0; i < nameIDs.length; i++) {
+      var entries = nameTable.strings[nameIDs[i]];
+      if (!entries) continue;
+      for (var j = 0; j < entries.length; j++) {
+        var text = entries[j].raw.replace(/[\x00-\x19\x80-\xff]/g, "");
+        if (SMALL_CAPS_RE.test(text)) return true;
+      }
+    }
+    return false;
+  };
+
   return TTFFont;
 })();
 
