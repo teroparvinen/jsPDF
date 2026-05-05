@@ -1,7 +1,7 @@
 /** @license
  *
  * jsPDF - PDF Document creation from JavaScript
- * Version 4.2.1 Built on 2026-03-17T11:11:27.057Z
+ * Version 4.2.1 Built on 2026-05-05T16:04:10.139Z
  *                      CommitID 00000000
  *
  * Copyright (c) 2010-2025 James Hall <james@parall.ax>, https://github.com/MrRio/jsPDF
@@ -21843,9 +21843,13 @@ jsPDF.API.addMetadata = function (metadata, rawXmlOrNamespaceUri) {
     var padz = ["", "0", "00", "000", "0000"];
     var ar = [""];
     for (var i = 0, l = text.length, t; i < l; ++i) {
-      t = font.metadata.characterToGlyph(text.charCodeAt(i));
+      var charCode = text.charCodeAt(i);
+      t = font.metadata.characterToGlyph(charCode);
+      if (font.metadata.applyFeaturesToGlyph) {
+        t = font.metadata.applyFeaturesToGlyph(t);
+      }
       font.metadata.glyIdsUsed.push(t);
-      font.metadata.toUnicode[t] = text.charCodeAt(i);
+      font.metadata.toUnicode[t] = charCode;
       if (widths.indexOf(t) == -1) {
         widths.push(t);
         widths.push([parseInt(font.metadata.widthOfGlyph(t), 10)]);
@@ -22778,6 +22782,8 @@ jsPDF.API.TTFFont = function () {
     this.os2 = new OS2Table(this);
     this.loca = new LocaTable(this);
     this.glyf = new GlyfTable(this);
+    this.gsub = new GsubTable(this);
+    this.gsub.smcpEnabled = this.gsub.exists && Object.keys(this.gsub.smcpSubstitutions).length > 0 && isSmallCapsFont(this.name);
     this.ascender = this.os2.exists && this.os2.ascender || this.hhea.ascender;
     this.decender = this.os2.exists && this.os2.decender || this.hhea.decender;
     this.lineGap = this.os2.exists && this.os2.lineGap || this.hhea.lineGap;
@@ -22842,6 +22848,12 @@ jsPDF.API.TTFFont = function () {
     var _ref;
     return ((_ref = this.cmap.unicode) != null ? _ref.codeMap[character] : void 0) || 0;
   };
+  TTFFont.prototype.applyFeaturesToGlyph = function (glyphId) {
+    if (this.gsub && this.gsub.smcpEnabled && this.gsub.smcpSubstitutions[glyphId] !== undefined) {
+      return this.gsub.smcpSubstitutions[glyphId];
+    }
+    return glyphId;
+  };
   TTFFont.prototype.widthOfGlyph = function (glyph) {
     var scale;
     scale = 1000.0 / this.head.unitsPerEm;
@@ -22865,6 +22877,23 @@ jsPDF.API.TTFFont = function () {
     }
     gap = includeGap ? this.lineGap : 0;
     return (this.ascender + gap - this.decender) / 1000 * size;
+  };
+  var SMALL_CAPS_RE = /small[\s_-]?caps|smallcaps|\bSC\b/i;
+
+  // Turns out the most common way to detect a font that is intended to render in small caps
+  // is to check for the presence of smcp gsub substitutions and a simple string lookup in
+  // the font name records
+  var isSmallCapsFont = function isSmallCapsFont(nameTable) {
+    var nameIDs = [1, 4, 17];
+    for (var i = 0; i < nameIDs.length; i++) {
+      var entries = nameTable.strings[nameIDs[i]];
+      if (!entries) continue;
+      for (var j = 0; j < entries.length; j++) {
+        var text = entries[j].raw.replace(/[\x00-\x19\x80-\xff]/g, "");
+        if (SMALL_CAPS_RE.test(text)) return true;
+      }
+    }
+    return false;
   };
   return TTFFont;
 }();
@@ -24078,6 +24107,116 @@ var LocaTable = function (_super) {
     return newLocaTable;
   };
   return LocaTable;
+}(Table);
+var GsubTable = function (_super) {
+  __extends(GsubTable, _super);
+  function GsubTable() {
+    return GsubTable.__super__.constructor.apply(this, arguments);
+  }
+  GsubTable.prototype.tag = "GSUB";
+  GsubTable.prototype.parse = function (data) {
+    var i, j, tableOffset, featureListOffset, lookupListOffset, featureCount, tag, featureOffset, savedPos, lookupIndexCount, smcpLookupIndices, lookupCount, lookupOffsets, lookupIndex, lookupOffset, lookupType, subTableCount, subTableOffsets, self;
+    this.smcpSubstitutions = {};
+    tableOffset = this.offset;
+    data.pos = tableOffset;
+    data.pos += 4; // skip MajorVersion + MinorVersion
+    data.readUInt16(); // scriptListOffset (unused)
+    featureListOffset = data.readUInt16();
+    lookupListOffset = data.readUInt16();
+    data.pos = tableOffset + featureListOffset;
+    featureCount = data.readUInt16();
+    smcpLookupIndices = [];
+    for (i = 0; i < featureCount; i++) {
+      tag = data.readString(4);
+      featureOffset = data.readUInt16();
+      if (tag === "smcp") {
+        savedPos = data.pos;
+        data.pos = tableOffset + featureListOffset + featureOffset;
+        data.readUInt16(); // featureParamsOffset
+        lookupIndexCount = data.readUInt16();
+        for (j = 0; j < lookupIndexCount; j++) {
+          smcpLookupIndices.push(data.readUInt16());
+        }
+        data.pos = savedPos;
+      }
+    }
+    if (smcpLookupIndices.length === 0) return;
+    data.pos = tableOffset + lookupListOffset;
+    lookupCount = data.readUInt16();
+    lookupOffsets = [];
+    for (i = 0; i < lookupCount; i++) {
+      lookupOffsets.push(data.readUInt16());
+    }
+    self = this;
+    for (i = 0; i < smcpLookupIndices.length; i++) {
+      lookupIndex = smcpLookupIndices[i];
+      if (lookupIndex >= lookupCount) continue;
+      lookupOffset = tableOffset + lookupListOffset + lookupOffsets[lookupIndex];
+      data.pos = lookupOffset;
+      lookupType = data.readUInt16();
+      data.readUInt16(); // lookupFlag
+      subTableCount = data.readUInt16();
+      subTableOffsets = [];
+      for (j = 0; j < subTableCount; j++) {
+        subTableOffsets.push(lookupOffset + data.readUInt16());
+      }
+      if (lookupType === 1) {
+        for (j = 0; j < subTableOffsets.length; j++) {
+          self.parseSingleSubst(data, subTableOffsets[j]);
+        }
+      }
+    }
+  };
+  GsubTable.prototype.parseSingleSubst = function (data, offset) {
+    var substFormat, coverageRelOffset, coverageOffset, deltaGlyphID, glyphCount, substituteGlyphs, glyphs, i;
+    data.pos = offset;
+    substFormat = data.readUInt16();
+    coverageRelOffset = data.readUInt16();
+    coverageOffset = offset + coverageRelOffset;
+    if (substFormat === 1) {
+      deltaGlyphID = data.readInt16();
+      glyphs = this.parseCoverage(data, coverageOffset);
+      for (i = 0; i < glyphs.length; i++) {
+        this.smcpSubstitutions[glyphs[i]] = glyphs[i] + deltaGlyphID & 0xffff;
+      }
+    } else if (substFormat === 2) {
+      glyphCount = data.readUInt16();
+      substituteGlyphs = [];
+      for (i = 0; i < glyphCount; i++) {
+        substituteGlyphs.push(data.readUInt16());
+      }
+      glyphs = this.parseCoverage(data, coverageOffset);
+      for (i = 0; i < glyphs.length; i++) {
+        if (i < substituteGlyphs.length) {
+          this.smcpSubstitutions[glyphs[i]] = substituteGlyphs[i];
+        }
+      }
+    }
+  };
+  GsubTable.prototype.parseCoverage = function (data, offset) {
+    var coverageFormat, glyphCount, rangeCount, startGlyphID, endGlyphID, glyphs, i, g;
+    data.pos = offset;
+    coverageFormat = data.readUInt16();
+    glyphs = [];
+    if (coverageFormat === 1) {
+      glyphCount = data.readUInt16();
+      for (i = 0; i < glyphCount; i++) {
+        glyphs.push(data.readUInt16());
+      }
+    } else if (coverageFormat === 2) {
+      rangeCount = data.readUInt16();
+      for (i = 0; i < rangeCount; i++) {
+        startGlyphID = data.readUInt16();
+        endGlyphID = data.readUInt16();
+        data.readUInt16(); // startCoverageIndex
+        for (g = startGlyphID; g <= endGlyphID; g++) {
+          glyphs.push(g);
+        }
+      }
+    }
+    return glyphs;
+  };
+  return GsubTable;
 }(Table);
 
 /************************************************************************************/
